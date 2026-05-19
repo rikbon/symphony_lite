@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "symphony-lite"
+version = "0.1.0"
+description = "A minimal orchestrator for autonomous coding agents."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pyyaml>=6.0"
+]
+
+[project.scripts]
+symphony-lite = "symphony_lite:main"
