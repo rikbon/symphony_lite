@@ -168,8 +168,10 @@ def resolve_config(raw: dict, cli_args) -> ServiceConfig:
 
     hooks = raw.get("hooks", {})
     cfg.hook_after_create = hooks.get("after_create")
-    cfg.hook_before_run   = hooks.get("before_run")
-    cfg.hook_after_run    = hooks.get("after_run")
+    # Support both 'before_run' (internal) and 'before_turn' (SPEC/WORKFLOW.md)
+    cfg.hook_before_run   = hooks.get("before_run") or hooks.get("before_turn")
+    # Support both 'after_run' (internal) and 'after_turn' (SPEC/WORKFLOW.md)
+    cfg.hook_after_run    = hooks.get("after_run") or hooks.get("after_turn")
     if "timeout_ms" in hooks:
         cfg.hook_timeout_ms = int(hooks["timeout_ms"])
 
@@ -250,43 +252,71 @@ def setup_workspace(repo_url: str, branch_name: str, cfg: ServiceConfig) -> tupl
 # SPEC §5.3.4 — Hook Runner
 # ═══════════════════════════════════════════════════════════════════
 
-def run_hook(script: Optional[str], name: str, cfg: ServiceConfig,
+def run_hook(script: Optional[str | list[str]], name: str, cfg: ServiceConfig,
              abort_on_fail: bool = True) -> bool:
     """
     Executes a shell hook defined in WORKFLOW.md.
+    Supports a single string or a list of command strings.
     abort_on_fail=True  → failure blocks execution (after_create, before_run).
     abort_on_fail=False → failure is logged but ignored (after_run).
     """
     if not script:
         return True
-    log.info(f"[Hook] Running '{name}'...")
-    try:
-        result = subprocess.run(script, shell=True, text=True, capture_output=True,
-                                timeout=cfg.hook_timeout_ms / 1000.0)
-        if result.returncode != 0:
-            log.error(f"[Hook] '{name}' failed (exit {result.returncode}): {result.stderr}")
-            return not abort_on_fail
-        log.info(f"[Hook] '{name}' OK.")
-        return True
-    except subprocess.TimeoutExpired:
-        log.error(f"[Hook] '{name}' timed out ({cfg.hook_timeout_ms}ms).")
-        return not abort_on_fail
+
+    commands = [script] if isinstance(script, str) else script
+    log.info(f"[Hook] Running '{name}' ({len(commands)} commands)...")
+
+    for cmd in commands:
+        try:
+            result = subprocess.run(cmd, shell=True, text=True, capture_output=True,
+                                    timeout=cfg.hook_timeout_ms / 1000.0)
+            if result.returncode != 0:
+                log.error(f"[Hook] '{name}' failed (exit {result.returncode}): {result.stderr}")
+                if abort_on_fail:
+                    return False
+            else:
+                log.info(f"[Hook] Command OK: {cmd[:50]}...")
+        except subprocess.TimeoutExpired:
+            log.error(f"[Hook] '{name}' timed out ({cfg.hook_timeout_ms}ms).")
+            if abort_on_fail:
+                return False
+
+    log.info(f"[Hook] '{name}' completed.")
+    return True
 
 
 # ═══════════════════════════════════════════════════════════════════
 # SPEC §5.4 — Prompt Builder
 # ═══════════════════════════════════════════════════════════════════
 
-def build_prompt(task: str, cfg: ServiceConfig, attempt: int) -> str:
+def build_prompt(task: str, cfg: ServiceConfig, attempt: int, context: Optional[dict] = None) -> str:
     """
     SPEC §5.4: builds the agent prompt.
     Uses the prompt_template from WORKFLOW.md if available,
     otherwise falls back to a built-in default prompt.
     """
+    ctx = context or {}
+    ctx.update({
+        "task": task,
+        "attempt": str(attempt),
+    })
+
     if cfg.prompt_template:
         # Basic template rendering with supported variables
         p = cfg.prompt_template
-        p = p.replace("{{ task }}", task).replace("{{ attempt }}", str(attempt))
+        # Support both simple {{ var }} and dotted {{ issue.var }}
+        # This is a naive implementation; for production, use jinja2 or similar.
+        def replace_vars(text, mapping, prefix=""):
+            for key, val in mapping.items():
+                full_key = f"{prefix}{key}"
+                if isinstance(val, dict):
+                    text = replace_vars(text, val, prefix=f"{full_key}.")
+                else:
+                    text = text.replace("{{ " + full_key + " }}", str(val))
+                    text = text.replace("{{" + full_key + "}}", str(val))
+            return text
+
+        p = replace_vars(p, ctx)
     else:
         p = (
             f"Solve the following task in this repository:\n\n"
@@ -305,10 +335,10 @@ def build_prompt(task: str, cfg: ServiceConfig, attempt: int) -> str:
 # SPEC §3.1 §7.2 — Agent Runner with lifecycle states and timeout
 # ═══════════════════════════════════════════════════════════════════
 
-def run_agent(task: str, cfg: ServiceConfig, attempt: int = 1) -> bool:
+def run_agent(task: str, cfg: ServiceConfig, attempt: int = 1, context: Optional[dict] = None) -> bool:
     """Launches the coding agent, tracking run attempt lifecycle states."""
     log.info(f"[Agent] State: {RunState.BUILDING_PROMPT.name} (attempt {attempt})")
-    prompt = build_prompt(task, cfg, attempt)
+    prompt = build_prompt(task, cfg, attempt, context=context)
 
     log.info(f"[Agent] State: {RunState.LAUNCHING_AGENT.name} | cmd: {cfg.agent_command}")
     print(f"\n[Symphony] Starting agent (attempt {attempt})...")
@@ -343,7 +373,7 @@ def run_agent(task: str, cfg: ServiceConfig, attempt: int = 1) -> bool:
 # SPEC §8.4 — Retry with Exponential Backoff
 # ═══════════════════════════════════════════════════════════════════
 
-def run_with_retry(task: str, cfg: ServiceConfig) -> bool:
+def run_with_retry(task: str, cfg: ServiceConfig, context: Optional[dict] = None) -> bool:
     """
     SPEC §8.4: delay = min(10000 * 2^(attempt-1), max_retry_backoff_ms)
     Capped at 3 attempts for local use (reasonable without a polling daemon).
@@ -359,7 +389,7 @@ def run_with_retry(task: str, cfg: ServiceConfig) -> bool:
                 log.error("[Retry] before_run hook failed. Aborting retry.")
                 return False
 
-        if run_agent(task, cfg, attempt=attempt):
+        if run_agent(task, cfg, attempt=attempt, context=context):
             return True
 
         if attempt < max_attempts:
@@ -480,8 +510,25 @@ def main():
             log.error("before_run hook failed. Aborting.")
             sys.exit(1)
 
+        # Build context for prompt rendering
+        context = {
+            "issue": {
+                "identifier": args.id,
+                "title": args.task.split("\n")[0][:100],
+                "description": args.task,
+                "priority": "medium", # Default
+            },
+            "repo": {
+                "url": args.url,
+                "branch": branch_name,
+            }
+        }
+
         # SPEC §8.4 — Run agent with optional retry
-        success = run_agent(args.task, cfg) if args.no_retry else run_with_retry(args.task, cfg)
+        if args.no_retry:
+            success = run_agent(args.task, cfg, context=context)
+        else:
+            success = run_with_retry(args.task, cfg, context=context)
 
         # SPEC §5.3.4 — after_run hook (always, even on failure)
         run_hook(cfg.hook_after_run, "after_run", cfg, abort_on_fail=False)
