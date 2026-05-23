@@ -14,3 +14,9 @@ dependencies = [
 
 [project.scripts]
 symphony-lite = "symphony_lite:main"
+
+[tool.setuptools]
+py-modules = ["symphony_lite"]
+
+[tool.setuptools.packages.find]
+exclude = ["symphony_workspaces*"]

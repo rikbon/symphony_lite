@@ -278,12 +278,17 @@ Senza questo file, l'agente opererà senza vincoli di qualità definiti.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Gestione degli errori
+### Gestione degli errori e dei processi
 
-- **Clone fallito**: Git restituisce un errore, `subprocess.run(..., check=True)` lo propaga e l'esecuzione si interrompe.
-- **Agente fallito**: `run_agent()` ritorna `False`; l'handoff viene saltato.
-- **Nessuna modifica**: Se l'agente non ha scritto codice, l'handoff lo rileva e informa senza committare.
-- **Ripristino directory**: Il blocco `finally` assicura sempre il ripristino della directory di lavoro originale, anche in caso di errore.
+| Scenario | Comportamento |
+|---|---|
+| **Gestione Processi** | L'orchestratore gira nel proprio **process group** (`os.setpgrp`). |
+| **Completamento Task** | Termina aggressivamente tutti i processi nel gruppo (`stop_all`) ed esce. |
+| **Interruzione Utente** | `SIGINT` (Ctrl+C) o `SIGTERM` attivano `stop_all` per una pulizia completa. |
+| Clone fallito | Git restituisce un errore, l'esecuzione si interrompe. |
+| Agente fallito | L'handoff viene saltato e l'orchestratore esce con codice 1. |
+| Nessuna modifica | L'handoff lo rileva e informa senza committare. |
+| Ripristino directory | Il blocco `finally` assicura sempre il ripristino della directory originale. |
 
 ---
 

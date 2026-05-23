@@ -30,6 +30,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -114,8 +115,10 @@ def load_workflow(workspace_path: Optional[Path] = None) -> tuple[dict, Optional
     prompt_body = content
 
     # SPEC §5.2 — Parse YAML front matter if present
-    if content.startswith("---"):
-        parts = content.split("---", 2)
+    if content.startswith("---") or content.startswith("--\n"):
+        # Handle both --- and -- (as seen in some files)
+        marker = "---" if content.startswith("---") else "--"
+        parts = content.split(marker, 2)
         if len(parts) >= 3:
             front = parts[1].strip()
             prompt_body = parts[2].strip()
@@ -419,6 +422,30 @@ def main():
     global log
     log = setup_logging()
 
+    # SPEC §7.2: Ensure we are in our own process group to manage children
+    try:
+        os.setpgrp()
+    except Exception:
+        pass
+
+    def stop_all(exit_code: int = 0):
+        """Aggressively terminates all processes in the group and exits."""
+        # Ignore TERM in the orchestrator itself to avoid recursive signals
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            # Send SIGTERM to the entire process group (0 means current group)
+            os.killpg(0, signal.SIGTERM)
+        except Exception:
+            pass
+        sys.exit(exit_code)
+
+    def signal_handler(sig, frame):
+        print("\n[Orchestrator] Stop signal received. Stopping all...")
+        stop_all(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     parser = argparse.ArgumentParser(
         description=(
             "Symphony-Lite: minimal orchestrator for autonomous coding agents.\n"
@@ -458,7 +485,7 @@ def main():
                                 agent_command="opencode" if args.opencode else "gemini")
     if not preflight_validation(initial_cfg):
         log.error("Preflight validation failed. Aborting.")
-        sys.exit(1)
+        stop_all(1)
 
     success = False
     try:
@@ -473,18 +500,18 @@ def main():
         # SPEC §6.3 — Preflight with real config (post-workflow load)
         if not preflight_validation(cfg):
             log.error("Preflight validation (post-workflow) failed. Aborting.")
-            sys.exit(1)
+            stop_all(1)
 
         # SPEC §5.3.4 — after_create hook (only when workspace is newly created)
         if created_now:
             if not run_hook(cfg.hook_after_create, "after_create", cfg, abort_on_fail=True):
                 log.error("after_create hook failed. Aborting.")
-                sys.exit(1)
+                stop_all(1)
 
         # SPEC §5.3.4 — before_run hook
         if not run_hook(cfg.hook_before_run, "before_run", cfg, abort_on_fail=True):
             log.error("before_run hook failed. Aborting.")
-            sys.exit(1)
+            stop_all(1)
 
         # SPEC §8.4 — Run agent with optional retry
         success = run_agent(args.task, cfg) if args.no_retry else run_with_retry(args.task, cfg)
@@ -494,10 +521,14 @@ def main():
 
         if success:
             handle_handoff(branch_name)
+            log.info("[Orchestrator] Task complete. Stopping all and exiting.")
+            stop_all(0)
+        else:
+            stop_all(1)
 
     except subprocess.CalledProcessError as e:
         log.error(f"Git/system command failed: {e}")
-        sys.exit(1)
+        stop_all(1)
     finally:
         # Always restore the original working directory
         os.chdir(original_dir)

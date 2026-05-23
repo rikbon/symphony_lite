@@ -322,10 +322,13 @@ pytest tests/ -v
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### Error Handling
+### Error Handling & Process Management
 
 | Scenario | Behavior |
 |---|---|
+| **Process Management** | Orchestrator runs in its own **process group** (`os.setpgrp`). |
+| **Task Completion** | Aggressively kills all processes in the group (`stop_all`) and exits. |
+| **User Interrupt** | `SIGINT` (Ctrl+C) or `SIGTERM` triggers `stop_all` for a clean wipe. |
 | Git clone fails | Hard abort |
 | `WORKFLOW.md` missing | Warning + default config |
 | YAML parse error | Error logged + default config |
