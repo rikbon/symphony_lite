@@ -310,12 +310,18 @@ def run_agent(task: str, cfg: ServiceConfig, attempt: int = 1) -> bool:
     log.info(f"[Agent] State: {RunState.BUILDING_PROMPT.name} (attempt {attempt})")
     prompt = build_prompt(task, cfg, attempt)
 
-    log.info(f"[Agent] State: {RunState.LAUNCHING_AGENT.name} | cmd: {cfg.agent_command}")
+    # Determine command structure based on the agent binary name
+    agent_bin = cfg.agent_command.lower()
+    if "opencode" in agent_bin:
+        cmd = [cfg.agent_command, "run", "--dangerously-skip-permissions", prompt]
+    else:
+        # Default to Gemini-style flags
+        cmd = [cfg.agent_command, "--approval-mode", "yolo", "--skip-trust", "-p", prompt]
+
+    log.info(f"[Agent] State: {RunState.LAUNCHING_AGENT.name} | cmd: {' '.join(cmd)}")
     print(f"\n[Symphony] Starting agent (attempt {attempt})...")
     print("-" * 60)
 
-    cmd = (["opencode", "run", prompt] if cfg.use_opencode
-           else ["gemini", "-y", prompt])
     timeout_s = cfg.turn_timeout_ms / 1000.0
 
     try:
